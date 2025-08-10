@@ -1,6 +1,16 @@
-English / [简体中文](./README-CN.md)
+# Apple Music ALAC / Dolby Atmos Downloader
 
-### ！！Must be installed first [MP4Box](https://gpac.io/downloads/gpac-nightly-builds/)，And confirm [MP4Box](https://gpac.io/downloads/gpac-nightly-builds/) Correctly added to environment variables
+Original script by Sorrow. Folked from zhaarey and modified by me to include fixes and improvements for some specific music downloads.
+
+## Important Notes
+
+### NovaSeele's Fixes:
+- **Fixed single song download bug**: Resolved "Song->Invalid type" error when downloading some specific individual songs
+- **Added `ripSong` function**: Proper handling of song URLs without converting to album URLs
+- **Improved Vocaloid support**: Better compatibility with Japanese Vocaloid and JPOP music
+
+### Prerequisites
+**Must be installed first [MP4Box](https://gpac.io/downloads/gpac-nightly-builds/)，And confirm [MP4Box](https://gpac.io/downloads/gpac-nightly-builds/) Correctly added to environment variables**
 
 ### Add features
 
@@ -23,21 +33,14 @@ For acquisition`aac-lc` `MV` `lyrics` You must fill in the information with a su
 - `aac-downmix (audio-stereo-downmix)`
 - `MV`
 
-# Apple Music ALAC / Dolby Atmos Downloader
-
-Original script by Sorrow. Modified by me to include some fixes and improvements.
-
 ## How to use
 1. Make sure the decryption program [wrapper](https://github.com/zhaarey/wrapper) is running
-2. Start downloading some albums: `go run main.go https://music.apple.com/us/album/whenever-you-need-somebody-2022-remaster/1624945511`.
-3. Start downloading single song: `go run main.go --song https://music.apple.com/us/album/never-gonna-give-you-up-2022-remaster/1624945511?i=1624945512` or `go run main.go https://music.apple.com/us/song/you-move-me-2022-remaster/1624945520`.
-4. Start downloading select: `go run main.go --select https://music.apple.com/us/album/whenever-you-need-somebody-2022-remaster/1624945511` input numbers separated by spaces.
-5. Start downloading some playlists: `go run main.go https://music.apple.com/us/playlist/taylor-swift-essentials/pl.3950454ced8c45a3b0cc693c2a7db97b` or `go run main.go https://music.apple.com/us/playlist/hi-res-lossless-24-bit-192khz/pl.u-MDAWvpjt38370N`.
-6. For dolby atmos: `go run main.go --atmos https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538`.
-7. For aac: `go run main.go --aac https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538`.
-8. For see quality: `go run main.go --debug https://music.apple.com/us/album/1989-taylors-version-deluxe/1713845538`.
-
-[Chinese tutorial - see Method 3 for details](https://telegra.ph/Apple-Music-Alac高解析度无损音乐下载教程-04-02-2)
+2. Start downloading some albums: `go run main.go https://music.apple.com/jp/album/mirai-collection-feat-初音ミク/1473121174`.
+3. Start downloading single song: `go run main.go --song https://music.apple.com/jp/song/きみも悪い人でよかった/1554002410` or `go run main.go https://music.apple.com/us/song/im-glad-youre-evil-too/1554002410`.
+4. Start downloading select: `go run main.go --select https://music.apple.com/jp/album/きみも悪い人でよかった/1554002146?i=1554002410`
+5. For dolby atmos: `go run main.go --atmos https://music.apple.com/jp/album/mirai-collection-feat-初音ミク/1473121174`.
+6. For aac: `go run main.go --aac https://music.apple.com/jp/album/mirai-collection-feat-初音ミク/1473121174`.
+7. For see quality: `go run main.go --debug https://music.apple.com/jp/album/mirai-collection-feat-初音ミク/1473121174`.
 
 ## Downloading lyrics
 
