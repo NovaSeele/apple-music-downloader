@@ -6,7 +6,6 @@ Original script by Sorrow. Folked from zhaarey and modified by me to include fix
 
 ### NovaSeele's Fixes:
 - **Fixed single song download bug**: Resolved "Song->Invalid type" error when downloading some specific individual songs
-- **Added `ripSong` function**: Proper handling of song URLs without converting to album URLs
 - **Improved Vocaloid support**: Better compatibility with Japanese Vocaloid and JPOP music
 
 ### Prerequisites
