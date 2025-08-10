@@ -33,7 +33,7 @@ For acquisition`aac-lc` `MV` `lyrics` You must fill in the information with a su
 - `MV`
 
 ## How to use
-1. Make sure the decryption program [wrapper](https://github.com/zhaarey/wrapper) is running
+1. Make sure the decryption program [wrapper](https://github.com/NovaSeele/wrapper) is running
 2. Start downloading some albums: `go run main.go https://music.apple.com/jp/album/mirai-collection-feat-初音ミク/1473121174`.
 3. Start downloading single song: `go run main.go --song https://music.apple.com/jp/song/きみも悪い人でよかった/1554002410` or `go run main.go https://music.apple.com/us/song/im-glad-youre-evil-too/1554002410`.
 4. Start downloading select: `go run main.go --select https://music.apple.com/jp/album/きみも悪い人でよかった/1554002146?i=1554002410`
