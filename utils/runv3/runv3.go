@@ -6,10 +6,9 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/gospider007/requests"
+	"github.com/go-resty/resty/v2"
 	"google.golang.org/protobuf/proto"
 
-	//"log/slog"
 	cdm "main/utils/runv3/cdm"
 	key "main/utils/runv3/key"
 	"os"
@@ -18,15 +17,13 @@ import (
 	"errors"
 	"io"
 
-	"github.com/Eyevinn/mp4ff/mp4"
+	"github.com/itouakirai/mp4ff/mp4"
 
-	//"io/ioutil"
 	"encoding/json"
 	"net/http"
 	"os/exec"
 	"strings"
 	"sync"
-	//"time"
 
 	"github.com/grafov/m3u8"
 	"github.com/schollz/progressbar/v3"
@@ -39,24 +36,6 @@ type PlaybackLicense struct {
 	Status     int    `json:"status"`
 }
 
-//	func log() {
-//		f, err := os.OpenFile("log.txt", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-//		if err != nil {
-//			slog.Error("error opening file: %s", err)
-//		}
-//		defer func(f *os.File) {
-//			err := f.Close()
-//			if err != nil {
-//				slog.Error("error closing file: %s", err)
-//			}
-//		}(f)
-//		opts := slog.HandlerOptions{
-//			AddSource: true,
-//			Level:     slog.LevelDebug,
-//		}
-//		logger := slog.New(slog.NewJSONHandler(os.Stdout, &opts))
-//		slog.SetDefault(logger)
-//	}
 func getPSSH(contentId string, kidBase64 string) (string, error) {
 	kidBytes, err := base64.StdEncoding.DecodeString(kidBase64)
 	if err != nil {
@@ -80,41 +59,50 @@ func getPSSH(contentId string, kidBase64 string) (string, error) {
 	pssh := base64.StdEncoding.EncodeToString(widevineCenc)
 	return pssh, nil
 }
-func BeforeRequest(cl *requests.Client, preCtx context.Context, method string, href string, options ...requests.RequestOption) (resp *requests.Response, err error) {
-	data := options[0].Data
+
+func BeforeRequest(cl *resty.Client, ctx context.Context, url string, body []byte) (*resty.Response, error) {
 	jsondata := map[string]interface{}{
-		"challenge":      base64.StdEncoding.EncodeToString(data.([]byte)),
+		"challenge":      base64.StdEncoding.EncodeToString(body), // 'body' is passed in directly
 		"key-system":     "com.widevine.alpha",
-		"uri":            "data:;base64," + preCtx.Value("pssh").(string),
-		"adamId":         preCtx.Value("adamId").(string),
+		"uri":            ctx.Value("uriPrefix").(string) + "," + ctx.Value("pssh").(string),
+		"adamId":         ctx.Value("adamId").(string),
 		"isLibrary":      false,
 		"user-initiated": true,
 	}
-	options[0].Data = nil
-	options[0].Json = jsondata
-	resp, err = cl.Request(preCtx, method, href, options...)
+
+	resp, err := cl.R().
+		SetContext(ctx).
+		SetBody(jsondata).
+		Post(url)
+
 	if err != nil {
 		fmt.Println(err)
 	}
 
-	return
+	return resp, err
 }
-func AfterRequest(Response *requests.Response) ([]byte, error) {
-	var ResponseData PlaybackLicense
-	_, err := Response.Json(&ResponseData)
+
+func AfterRequest(response *resty.Response) ([]byte, error) {
+	var responseData PlaybackLicense
+
+	err := json.Unmarshal(response.Body(), &responseData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse response: %v", err)
+		return nil, fmt.Errorf("failed to parse response JSON: %v", err)
 	}
-	if ResponseData.ErrorCode != 0 || ResponseData.Status != 0 {
-		return nil, fmt.Errorf("error code: %d", ResponseData.ErrorCode)
+
+	if responseData.ErrorCode != 0 || responseData.Status != 0 {
+		return nil, fmt.Errorf("error in license response, code: %d, status: %d", responseData.ErrorCode, responseData.Status)
 	}
-	License, err := base64.StdEncoding.DecodeString(ResponseData.License)
+
+	license, err := base64.StdEncoding.DecodeString(responseData.License)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode license: %v", err)
 	}
-	return License, nil
+
+	return license, nil
 }
-func GetWebplayback(adamId string, authtoken string, mutoken string, mvmode bool) (string, string, error) {
+
+func GetWebplayback(adamId string, authtoken string, mutoken string, mvmode bool) (string, string, string, error) {
 	url := "https://play.music.apple.com/WebObjects/MZPlay.woa/wa/webPlayback"
 	postData := map[string]string{
 		"salableAdamId": adamId,
@@ -122,12 +110,12 @@ func GetWebplayback(adamId string, authtoken string, mutoken string, mvmode bool
 	jsonData, err := json.Marshal(postData)
 	if err != nil {
 		fmt.Println("Error encoding JSON:", err)
-		return "", "", err
+		return "", "", "", err
 	}
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte(jsonData)))
 	if err != nil {
 		fmt.Println("Error creating request:", err)
-		return "", "", err
+		return "", "", "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "https://music.apple.com")
@@ -142,7 +130,7 @@ func GetWebplayback(adamId string, authtoken string, mutoken string, mvmode bool
 	//resp, err := client.Do(req)
 	if err != nil {
 		fmt.Println("Error sending request:", err)
-		return "", "", err
+		return "", "", "", err
 	}
 	defer resp.Body.Close()
 	//fmt.Println("Response Status:", resp.Status)
@@ -150,25 +138,25 @@ func GetWebplayback(adamId string, authtoken string, mutoken string, mvmode bool
 	err = json.NewDecoder(resp.Body).Decode(&obj)
 	if err != nil {
 		fmt.Println("json err:", err)
-		return "", "", err
+		return "", "", "", err
 	}
 	if len(obj.List) > 0 {
 		if mvmode {
-			return obj.List[0].HlsPlaylistUrl, "", nil
+			return obj.List[0].HlsPlaylistUrl, "", "", nil
 		}
 		// 遍历 Assets
 		for i := range obj.List[0].Assets {
 			if obj.List[0].Assets[i].Flavor == "28:ctrp256" {
-				kidBase64, fileurl, err := extractKidBase64(obj.List[0].Assets[i].URL, false)
+				kidBase64, fileurl, uriPrefix, err := extractKidBase64(obj.List[0].Assets[i].URL, false)
 				if err != nil {
-					return "", "", err
+					return "", "", "", err
 				}
-				return fileurl, kidBase64, nil
+				return fileurl, kidBase64, uriPrefix, nil
 			}
 			continue
 		}
 	}
-	return "", "", errors.New("Unavailable")
+	return "", "", "", errors.New("Unavailable")
 }
 
 type Songlist struct {
@@ -183,30 +171,32 @@ type Songlist struct {
 	Status int `json:"status"`
 }
 
-func extractKidBase64(b string, mvmode bool) (string, string, error) {
+func extractKidBase64(b string, mvmode bool) (string, string, string, error) {
 	resp, err := http.Get(b)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", "", errors.New(resp.Status)
+		return "", "", "", errors.New(resp.Status)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	masterString := string(body)
 	from, listType, err := m3u8.DecodeFrom(strings.NewReader(masterString), true)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	var kidbase64 string
+	var uriPrefix string
 	var urlBuilder strings.Builder
 	if listType == m3u8.MEDIA {
 		mediaPlaylist := from.(*m3u8.MediaPlaylist)
 		if mediaPlaylist.Key != nil {
 			split := strings.Split(mediaPlaylist.Key.URI, ",")
+			uriPrefix = split[0]
 			kidbase64 = split[1]
 			lastSlashIndex := strings.LastIndex(b, "/")
 			// 截取最后一个斜杠之前的部分
@@ -233,7 +223,7 @@ func extractKidBase64(b string, mvmode bool) (string, string, error) {
 	} else {
 		fmt.Println("Not a media playlist")
 	}
-	return kidbase64, urlBuilder.String(), nil
+	return kidbase64, urlBuilder.String(), uriPrefix, nil
 }
 func extsong(b string) bytes.Buffer {
 	resp, err := http.Get(b)
@@ -263,18 +253,19 @@ func extsong(b string) bytes.Buffer {
 	io.Copy(io.MultiWriter(&buffer, bar), resp.Body)
 	return buffer
 }
-func Run(adamId string, trackpath string, authtoken string, mutoken string, mvmode bool) (string, error) {
+func Run(adamId string, trackpath string, authtoken string, mutoken string, mvmode bool, serverUrl string) (string, error) {
 	var keystr string //for mv key
 	var fileurl string
 	var kidBase64 string
+	var uriPrefix string
 	var err error
 	if mvmode {
-		kidBase64, fileurl, err = extractKidBase64(trackpath, true)
+		kidBase64, fileurl, uriPrefix, err = extractKidBase64(trackpath, true)
 		if err != nil {
 			return "", err
 		}
 	} else {
-		fileurl, kidBase64, err = GetWebplayback(adamId, authtoken, mutoken, false)
+		fileurl, kidBase64, uriPrefix, err = GetWebplayback(adamId, authtoken, mutoken, false)
 		if err != nil {
 			return "", err
 		}
@@ -282,19 +273,19 @@ func Run(adamId string, trackpath string, authtoken string, mutoken string, mvmo
 	ctx := context.Background()
 	ctx = context.WithValue(ctx, "pssh", kidBase64)
 	ctx = context.WithValue(ctx, "adamId", adamId)
+	ctx = context.WithValue(ctx, "uriPrefix", uriPrefix)
 	pssh, err := getPSSH("", kidBase64)
 	//fmt.Println(pssh)
 	if err != nil {
 		fmt.Println(err)
 		return "", err
 	}
-	headers := map[string]interface{}{
+	headers := map[string]string{
 		"authorization":            "Bearer " + authtoken,
 		"x-apple-music-user-token": mutoken,
 	}
-	client, _ := requests.NewClient(nil, requests.ClientOption{
-		Headers: headers,
-	})
+	client := resty.New()
+	client.SetHeaders(headers)
 	key := key.Key{
 		ReqCli:        client,
 		BeforeRequest: BeforeRequest,
@@ -302,8 +293,8 @@ func Run(adamId string, trackpath string, authtoken string, mutoken string, mvmo
 	}
 	key.CdmInit()
 	var keybt []byte
-	if strings.Contains(adamId, "ra.") {
-		keystr, keybt, err = key.GetKey(ctx, "https://play.itunes.apple.com/WebObjects/MZPlay.woa/web/radio/versions/1/license", pssh, nil)
+	if serverUrl != "" {
+		keystr, keybt, err = key.GetKey(ctx, serverUrl, pssh, nil)
 		if err != nil {
 			fmt.Println(err)
 			return "", err

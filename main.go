@@ -180,6 +180,7 @@ func getUrlArtistName(artistUrl string, token string) (string, string, error) {
 	req.Header.Set("Origin", "https://music.apple.com")
 	query := url.Values{}
 	query.Set("l", Config.Language)
+	req.URL.RawQuery = query.Encode()
 	do, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", "", err
@@ -325,11 +326,15 @@ func checkArtist(artistUrl string, token string, relationship string) ([]string,
 }
 
 func writeCover(sanAlbumFolder, name string, url string) (string, error) {
-	covPath := filepath.Join(sanAlbumFolder, name+"."+Config.CoverFormat)
+	originalUrl := url
+	var ext string
+	var covPath string
 	if Config.CoverFormat == "original" {
-		ext := strings.Split(url, "/")[len(strings.Split(url, "/"))-2]
+		ext = strings.Split(url, "/")[len(strings.Split(url, "/"))-2]
 		ext = ext[strings.LastIndex(ext, ".")+1:]
 		covPath = filepath.Join(sanAlbumFolder, name+"."+ext)
+	} else {
+		covPath = filepath.Join(sanAlbumFolder, name+"."+Config.CoverFormat)
 	}
 	exists, err := fileExists(covPath)
 	if err != nil {
@@ -360,7 +365,32 @@ func writeCover(sanAlbumFolder, name string, url string) (string, error) {
 	}
 	defer do.Body.Close()
 	if do.StatusCode != http.StatusOK {
-		return "", errors.New(do.Status)
+		if Config.CoverFormat == "original" {
+			fmt.Println("Failed to get cover, falling back to " + ext + " url.")
+			splitByDot := strings.Split(originalUrl, ".")
+			last := splitByDot[len(splitByDot)-1]
+			fallback := originalUrl[:len(originalUrl)-len(last)] + ext
+			fallback = strings.Replace(fallback, "{w}x{h}", Config.CoverSize, 1)
+			fmt.Println("Fallback URL:", fallback)
+			req, err = http.NewRequest("GET", fallback, nil)
+			if err != nil {
+				fmt.Println("Failed to create request for fallback url.")
+				return "", err
+			}
+			req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+			do, err = http.DefaultClient.Do(req)
+			if err != nil {
+				fmt.Println("Failed to get cover from fallback url.")
+				return "", err
+			}
+			defer do.Body.Close()
+			if do.StatusCode != http.StatusOK {
+				fmt.Println(fallback)
+				return "", errors.New(do.Status)
+			}
+		} else {
+			return "", errors.New(do.Status)
+		}
 	}
 	f, err := os.Create(covPath)
 	if err != nil {
@@ -606,14 +636,131 @@ func handleSearch(searchType string, queryParts []string, token string) (string,
 
 // END: New functions for search functionality
 
+// CONVERSION FEATURE: Determine if source codec is lossy (rough heuristic by extension/codec name).
+func isLossySource(ext string, codec string) bool {
+	ext = strings.ToLower(ext)
+	if ext == ".m4a" && (codec == "AAC" || strings.Contains(codec, "AAC") || strings.Contains(codec, "ATMOS")) {
+		return true
+	}
+	if ext == ".mp3" || ext == ".opus" || ext == ".ogg" {
+		return true
+	}
+	return false
+}
+
+// CONVERSION FEATURE: Build ffmpeg arguments for desired target.
+func buildFFmpegArgs(ffmpegPath, inPath, outPath, targetFmt, extraArgs string) ([]string, error) {
+	args := []string{"-y", "-i", inPath, "-vn"}
+	switch targetFmt {
+	case "flac":
+		args = append(args, "-c:a", "flac")
+	case "mp3":
+		// VBR quality 2 ~ high quality
+		args = append(args, "-c:a", "libmp3lame", "-qscale:a", "2")
+	case "opus":
+		// Medium/high quality
+		args = append(args, "-c:a", "libopus", "-b:a", "192k", "-vbr", "on")
+	case "wav":
+		args = append(args, "-c:a", "pcm_s16le")
+	case "copy":
+		// Just container copy (probably pointless for same container)
+		args = append(args, "-c", "copy")
+	default:
+		return nil, fmt.Errorf("unsupported convert-format: %s", targetFmt)
+	}
+	if extraArgs != "" {
+		// naive split; for complex quoting you could enhance
+		args = append(args, strings.Fields(extraArgs)...)
+	}
+	args = append(args, outPath)
+	return args, nil
+}
+
+// CONVERSION FEATURE: Perform conversion if enabled.
+func convertIfNeeded(track *task.Track) {
+	if !Config.ConvertAfterDownload {
+		return
+	}
+	if Config.ConvertFormat == "" {
+		return
+	}
+	srcPath := track.SavePath
+	if srcPath == "" {
+		return
+	}
+	ext := strings.ToLower(filepath.Ext(srcPath))
+	targetFmt := strings.ToLower(Config.ConvertFormat)
+
+	// Map extension for output
+	if targetFmt == "copy" {
+		fmt.Println("Convert (copy) requested; skipping because it produces no new format.")
+		return
+	}
+
+	if Config.ConvertSkipIfSourceMatch {
+		if ext == "."+targetFmt {
+			fmt.Printf("Conversion skipped (already %s)\n", targetFmt)
+			return
+		}
+	}
+
+	outBase := strings.TrimSuffix(srcPath, ext)
+	outPath := outBase + "." + targetFmt
+
+	// Warn about lossy -> lossless
+	if Config.ConvertWarnLossyToLossless && (targetFmt == "flac" || targetFmt == "wav") &&
+		isLossySource(ext, track.Codec) {
+		fmt.Println("Warning: Converting lossy source to lossless container will not improve quality.")
+	}
+
+	if _, err := exec.LookPath(Config.FFmpegPath); err != nil {
+		fmt.Printf("ffmpeg not found at '%s'; skipping conversion.\n", Config.FFmpegPath)
+		return
+	}
+
+	args, err := buildFFmpegArgs(Config.FFmpegPath, srcPath, outPath, targetFmt, Config.ConvertExtraArgs)
+	if err != nil {
+		fmt.Println("Conversion config error:", err)
+		return
+	}
+
+	fmt.Printf("Converting -> %s ...\n", targetFmt)
+	cmd := exec.Command(Config.FFmpegPath, args...)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	start := time.Now()
+	if err := cmd.Run(); err != nil {
+		fmt.Println("Conversion failed:", err)
+		// leave original
+		return
+	}
+	fmt.Printf("Conversion completed in %s: %s\n", time.Since(start).Truncate(time.Millisecond), filepath.Base(outPath))
+
+	if !Config.ConvertKeepOriginal {
+		if err := os.Remove(srcPath); err != nil {
+			fmt.Println("Failed to remove original after conversion:", err)
+		} else {
+			track.SavePath = outPath
+			track.SaveName = filepath.Base(outPath)
+			fmt.Println("Original removed.")
+		}
+	} else {
+		// Keep both but point track to new file (optional decision)
+		track.SavePath = outPath
+		track.SaveName = filepath.Base(outPath)
+	}
+}
+
 func ripTrack(track *task.Track, token string, mediaUserToken string) {
 	var err error
 	counter.Total++
 	fmt.Printf("Track %d of %d: %s\n", track.TaskNum, track.TaskTotal, track.Type)
+
 	//提前获取到的播放列表下track所在的专辑信息
 	if track.PreType == "playlists" && Config.UseSongInfoForPlaylist {
 		track.GetAlbumData(token)
 	}
+
 	//mv dl dev
 	if track.Type == "music-videos" {
 		if len(mediaUserToken) <= 50 {
@@ -635,6 +782,7 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 		counter.Success++
 		return
 	}
+
 	needDlAacLc := false
 	if dl_aac && Config.AacType == "aac-lc" {
 		needDlAacLc = true
@@ -714,6 +862,17 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 	trackPath := filepath.Join(track.SaveDir, track.SaveName)
 	lrcFilename := fmt.Sprintf("%s.%s", forbiddenNames.ReplaceAllString(songName, "_"), Config.LrcFormat)
 
+	// Determine possible post-conversion target file (so we can skip re-download)
+	var convertedPath string
+	considerConverted := false
+	if Config.ConvertAfterDownload &&
+		Config.ConvertFormat != "" &&
+		strings.ToLower(Config.ConvertFormat) != "copy" &&
+		!Config.ConvertKeepOriginal {
+		convertedPath = strings.TrimSuffix(trackPath, filepath.Ext(trackPath)) + "." + strings.ToLower(Config.ConvertFormat)
+		considerConverted = true
+	}
+
 	//get lrc
 	var lrc string = ""
 	if Config.EmbedLrc || Config.SaveLrcFile {
@@ -733,23 +892,34 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 		}
 	}
 
-	exists, err := fileExists(trackPath)
+	// Existence check now considers converted output (if original was deleted)
+	existsOriginal, err := fileExists(trackPath)
 	if err != nil {
 		fmt.Println("Failed to check if track exists.")
 	}
-	if exists {
+	if existsOriginal {
 		fmt.Println("Track already exists locally.")
 		counter.Success++
 		okDict[track.PreID] = append(okDict[track.PreID], track.TaskNum)
 		return
 	}
+	if considerConverted {
+		existsConverted, err2 := fileExists(convertedPath)
+		if err2 == nil && existsConverted {
+			fmt.Println("Converted track already exists locally.")
+			counter.Success++
+			okDict[track.PreID] = append(okDict[track.PreID], track.TaskNum)
+			return
+		}
+	}
+
 	if needDlAacLc {
 		if len(mediaUserToken) <= 50 {
 			fmt.Println("Invalid media-user-token")
 			counter.Error++
 			return
 		}
-		_, err := runv3.Run(track.ID, trackPath, token, mediaUserToken, false)
+		_, err := runv3.Run(track.ID, trackPath, token, mediaUserToken, false, "")
 		if err != nil {
 			fmt.Println("Failed to dl aac-lc:", err)
 			if err.Error() == "Unavailable" {
@@ -808,6 +978,10 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 		counter.Unavailable++
 		return
 	}
+
+	// CONVERSION FEATURE hook
+	convertIfNeeded(track)
+
 	counter.Success++
 	okDict[track.PreID] = append(okDict[track.PreID], track.TaskNum)
 }
@@ -933,14 +1107,14 @@ func ripStation(albumId string, token string, storefront string, mediaUserToken 
 			fmt.Println("Radio already exists locally.")
 			return nil
 		}
-		assetsUrl, err := ampapi.GetStationAssetsUrl(station.ID, mediaUserToken, token)
+		assetsUrl, serverUrl, err := ampapi.GetStationAssetsUrlAndServerUrl(station.ID, mediaUserToken, token)
 		if err != nil {
 			fmt.Println("Failed to get station assets url.", err)
 			counter.Error++
 			return err
 		}
 		trackM3U8 := strings.ReplaceAll(assetsUrl, "index.m3u8", "256/prog_index.m3u8")
-		keyAndUrls, _ := runv3.Run(station.ID, trackM3U8, token, mediaUserToken, true)
+		keyAndUrls, _ := runv3.Run(station.ID, trackM3U8, token, mediaUserToken, true, serverUrl)
 		err = runv3.ExtMvData(keyAndUrls, trackPath)
 		if err != nil {
 			fmt.Println("Failed to download station stream.", err)
@@ -1820,17 +1994,17 @@ func mvDownloader(adamID string, saveDir string, token string, storefront string
 		return nil
 	}
 
-	mvm3u8url, _, _ := runv3.GetWebplayback(adamID, token, mediaUserToken, true)
+	mvm3u8url, _, _, _ := runv3.GetWebplayback(adamID, token, mediaUserToken, true)
 	if mvm3u8url == "" {
 		return errors.New("media-user-token may wrong or expired")
 	}
 
 	os.MkdirAll(saveDir, os.ModePerm)
 	videom3u8url, _ := extractVideo(mvm3u8url)
-	videokeyAndUrls, _ := runv3.Run(adamID, videom3u8url, token, mediaUserToken, true)
+	videokeyAndUrls, _ := runv3.Run(adamID, videom3u8url, token, mediaUserToken, true, "")
 	_ = runv3.ExtMvData(videokeyAndUrls, vidPath)
 	audiom3u8url, _ := extractMvAudio(mvm3u8url)
-	audiokeyAndUrls, _ := runv3.Run(adamID, audiom3u8url, token, mediaUserToken, true)
+	audiokeyAndUrls, _ := runv3.Run(adamID, audiom3u8url, token, mediaUserToken, true, "")
 	_ = runv3.ExtMvData(audiokeyAndUrls, audPath)
 
 	tags := []string{
@@ -2319,10 +2493,10 @@ func ripSong(songId string, token string, storefront string, mediaUserToken stri
 		fmt.Println("Failed to get song response.")
 		return err
 	}
-	
+
 	songData := manifest.Data[0]
 	albumId := songData.Relationships.Albums.Data[0].ID
-	
+
 	// Use album approach but only download the specific song
 	dl_song = true
 	err = ripAlbum(albumId, token, storefront, mediaUserToken, songId)
@@ -2330,6 +2504,6 @@ func ripSong(songId string, token string, storefront string, mediaUserToken stri
 		fmt.Println("Failed to rip song:", err)
 		return err
 	}
-	
+
 	return nil
 }
